@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import pyodbc
 import pandas.io.sql as psql
 
+# this is a test
+
 
 # Setup connection to Azure
 server = 'tcp:lettuce-predict.database.windows.net'
