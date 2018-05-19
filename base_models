@@ -1,0 +1,100 @@
+import pandas as pd
+import numpy as np
+import pandas.io.sql as psql
+import pyodbc
+
+from sklearn.metrics import mean_squared_log_error
+from sklearn.ensemble import RandomForestRegressor
+from mlxtend.regressor import StackingRegressor
+from mlxtend.data import boston_housing_data
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
+from sklearn.svm import SVR
+
+
+# Setup connection to Azure
+server = 'tcp:lettuce-predict.database.windows.net'
+database = 'lettuce_predict'
+username = 'readuser@lettuce-predict'
+password = 'rDuser1234!@#$'
+driver= '{ODBC Driver 13 for SQL Server}'
+
+cnxn = pyodbc.connect('DRIVER='+driver+';PORT=1433;SERVER='+server+';DATABASE='+database+';UID='+username + ';PWD='+password)
+
+# Import Modeling Dataset
+
+sql = """ 
+SELECT YEAR(t.date) as Year, MONTH(t.date) as Month, t.item_nbr, t.store_nbr, 
+SUM(t.unit_sales) AS unit_sales, i.family
+FROM train t
+JOIN items i on t.item_nbr = i.item_nbr
+WHERE t.date >= '2016-01-01'
+GROUP BY t.item_nbr, t.store_nbr, YEAR(t.date), MONTH(t.date), i.family
+ORDER BY YEAR, MONTH asc;
+"""
+train = psql.read_sql(sql, cnxn)
+train.head(5)
+
+train2 = train.copy()
+train2['Lag_1'] = train2.groupby(['item_nbr','store_nbr'])['unit_sales'].shift()
+train2['Lag_1_Diff'] = train2.groupby(['item_nbr','store_nbr'])['Lag_1'].diff()
+train2['Lag_2'] = train2.groupby(['item_nbr','store_nbr'])['unit_sales'].shift(2)
+train2['Lag_2_Diff'] = train2.groupby(['item_nbr','store_nbr'])['Lag_2'].diff()
+train2['Lag_3'] = train2.groupby(['item_nbr','store_nbr'])['unit_sales'].shift()
+train2['Lag_1_Diff'] = train2.groupby(['item_nbr','store_nbr'])['Lag_3'].diff()
+train2['SWMA'] = train2.apply(lambda row: (row.Lag_1 * 0.6) + (row.Lag_2 * 0.3) + (row.Lag_3 * 0.1), axis = 1)
+
+train2 = train2.dropna()
+train2.head()
+len(train2)
+
+dummy = pd.get_dummies(train2['family'])
+dummy.head()
+train3 = pd.concat([train2, dummy], axis=1)
+train3.head()
+
+train4 = train3.drop(['family'], axis=1)
+train4.head()
+
+val = train4[(train4['Month'] == 7) & (train4['Year'] == 2017)]
+val.head()
+train_f = train4[(train4['Month'] != 7) & (train4['Year'] != 2017)]
+train_f.head()
+
+xtr, xts = train_f.drop(['unit_sales'], axis=1), val.drop(['unit_sales'], axis=1)
+ytr, yts = train_f['unit_sales'].values, val['unit_sales'].values
+
+mdl = RandomForestRegressor(n_estimators=125, n_jobs=1, random_state=0)
+mdl.fit(xtr, ytr)
+
+p = mdl.predict(xts)
+p[p < 0] = 0
+yts[yts < 0] = 0
+
+def rmsle(ytrue, ypred):
+    return np.sqrt(mean_squared_log_error(ytrue, ypred))
+
+error = rmsle(yts, p)
+print(error)
+# RF w/ 25 estimators - 0.5805 RMSLE
+# RF w/ 125 estimators - 0.5742 RMSLE
+
+########## STACKED ENSEMBLE ###############
+
+# Initializing models
+
+lr = LinearRegression()
+svr_lin = SVR(kernel='linear')
+ridge = Ridge(random_state=1)
+svr_rbf = SVR(kernel='rbf')
+
+stregr = StackingRegressor(regressors=[svr_lin, lr, ridge],
+                           meta_regressor=svr_rbf)
+
+# Training the stacking classifier
+
+stregr.fit(xtr, ytr)
+p = stregr.predict(xts)
+
+error = rmsle(yts, p)
+print(error)
